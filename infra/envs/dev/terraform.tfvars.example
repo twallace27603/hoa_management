@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars and fill in (terraform.tfvars is gitignored).
+# In CI, these are supplied via -var flags backed by GitHub Actions secrets
+# instead of a committed file.
+
+subscription_id = "00000000-0000-0000-0000-000000000000"
+location        = "eastus2"
+
+postgres_administrator_password = "changeme-use-a-generated-secret"
+
+entra_tenant_id = "00000000-0000-0000-0000-000000000000"
+entra_client_id = "00000000-0000-0000-0000-000000000000"
+entra_jwks_uri  = "https://<tenant-subdomain>.ciamlogin.com/<tenant-id>/discovery/v2.0/keys"
+entra_issuer    = "https://<tenant-subdomain>.ciamlogin.com/<tenant-id>/v2.0"
+
+cors_origin = "https://<static-web-app-hostname>.azurestaticapps.net"

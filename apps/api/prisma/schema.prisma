@@ -1,0 +1,261 @@
+// HOA Management Platform - core multi-tenant data model.
+// Every tenant-scoped table carries hoaId directly (denormalized) so that
+// Postgres row-level security policies (see infra/sql/harden.sql - not yet
+// applied, pending app-side session context wiring) can eventually be
+// layered on top of the app-level tenant filtering already enforced in
+// every service (`where: { hoaId }`).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy, identity, roles
+// ---------------------------------------------------------------------------
+
+model Hoa {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships     Membership[]
+  documentFolders DocumentFolder[]
+  documents       Document[]
+  arcRequests     ArcRequest[]
+  violations      Violation[]
+  cmsPages        CmsPage[]
+  emailMessages   EmailMessage[]
+}
+
+// One identity record per authenticated person, linked to their Entra
+// External ID account. A single user can hold memberships (with different
+// roles) across multiple HOAs.
+model User {
+  id            String   @id @default(uuid())
+  entraObjectId String   @unique
+  email         String   @unique
+  displayName   String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  memberships Membership[]
+}
+
+// Roles are data, not an enum, so new roles can be introduced without a
+// schema migration. Guard logic keys off Role.name.
+model Role {
+  id       String  @id @default(uuid())
+  name     String  @unique
+  isGlobal Boolean @default(false)
+
+  memberships Membership[]
+}
+
+enum MembershipStatus {
+  PENDING
+  ACTIVE
+  REVOKED
+}
+
+// Authorization record: created by an HOA admin invite (status PENDING),
+// activated once the invitee completes sign-in via Entra External ID and the
+// callback links their entraObjectId to this record. hoaId is null only for
+// global roles (e.g. GLOBAL_ADMIN).
+model Membership {
+  id              String           @id @default(uuid())
+  userId          String?
+  user            User?            @relation(fields: [userId], references: [id])
+  hoaId           String?
+  hoa             Hoa?             @relation(fields: [hoaId], references: [id])
+  roleId          String
+  role            Role             @relation(fields: [roleId], references: [id])
+  status          MembershipStatus @default(PENDING)
+  invitedEmail    String
+  invitedByUserId String?
+  invitedAt       DateTime         @default(now())
+  activatedAt     DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@unique([hoaId, invitedEmail])
+}
+
+// ---------------------------------------------------------------------------
+// Document management
+// ---------------------------------------------------------------------------
+
+model DocumentFolder {
+  id        String           @id @default(uuid())
+  hoaId     String
+  hoa       Hoa              @relation(fields: [hoaId], references: [id])
+  parentId  String?
+  parent    DocumentFolder?  @relation("FolderChildren", fields: [parentId], references: [id])
+  children  DocumentFolder[] @relation("FolderChildren")
+  name      String
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  documents Document[]
+}
+
+enum DocumentVisibility {
+  MEMBER
+  BOARD_ONLY
+}
+
+model Document {
+  id               String             @id @default(uuid())
+  hoaId            String
+  hoa              Hoa                @relation(fields: [hoaId], references: [id])
+  folderId         String
+  folder           DocumentFolder     @relation(fields: [folderId], references: [id])
+  title            String
+  blobPath         String
+  visibility       DocumentVisibility @default(MEMBER)
+  uploadedByUserId String
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// ARC (architecture review) requests
+// ---------------------------------------------------------------------------
+
+enum ArcRequestStatus {
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  WITHDRAWN
+}
+
+model ArcRequest {
+  id                String           @id @default(uuid())
+  hoaId             String
+  hoa               Hoa              @relation(fields: [hoaId], references: [id])
+  submittedByUserId String
+  title             String
+  description       String
+  status            ArcRequestStatus @default(SUBMITTED)
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  attachments ArcRequestAttachment[]
+  reviews     ArcRequestReview[]
+}
+
+model ArcRequestAttachment {
+  id               String     @id @default(uuid())
+  arcRequestId     String
+  arcRequest       ArcRequest @relation(fields: [arcRequestId], references: [id])
+  fileName         String
+  blobPath         String
+  uploadedByUserId String
+  createdAt        DateTime   @default(now())
+}
+
+model ArcRequestReview {
+  id               String           @id @default(uuid())
+  arcRequestId     String
+  arcRequest       ArcRequest       @relation(fields: [arcRequestId], references: [id])
+  reviewedByUserId String
+  decision         ArcRequestStatus
+  comments         String?
+  createdAt        DateTime         @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Covenant violations - history is append-only. The application's database
+// role has UPDATE/DELETE revoked on ViolationHistoryEntry and ViolationPhoto
+// at the Postgres grant level (see infra/sql/harden.sql); the app can only
+// ever INSERT a new entry, never mutate or remove one.
+// ---------------------------------------------------------------------------
+
+model Violation {
+  id               String   @id @default(uuid())
+  hoaId            String
+  hoa              Hoa      @relation(fields: [hoaId], references: [id])
+  propertyAddress  String
+  reportedByUserId String
+  createdAt        DateTime @default(now())
+
+  historyEntries ViolationHistoryEntry[]
+  photos         ViolationPhoto[]
+}
+
+enum ViolationEventType {
+  REPORTED
+  NOTICE_SENT
+  STATUS_CHANGED
+  COMMENT_ADDED
+  RESOLVED
+  ESCALATED
+}
+
+model ViolationHistoryEntry {
+  id               String             @id @default(uuid())
+  violationId      String
+  violation        Violation          @relation(fields: [violationId], references: [id])
+  eventType        ViolationEventType
+  description      String
+  recordedByUserId String
+  recordedAt       DateTime           @default(now())
+}
+
+model ViolationPhoto {
+  id               String    @id @default(uuid())
+  violationId      String
+  violation        Violation @relation(fields: [violationId], references: [id])
+  blobPath         String
+  uploadedByUserId String
+  createdAt        DateTime  @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Simple content management
+// ---------------------------------------------------------------------------
+
+model CmsPage {
+  id              String   @id @default(uuid())
+  hoaId           String
+  hoa             Hoa      @relation(fields: [hoaId], references: [id])
+  slug            String
+  title           String
+  bodyHtml        String
+  isPublished     Boolean  @default(false)
+  updatedByUserId String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([hoaId, slug])
+}
+
+// ---------------------------------------------------------------------------
+// Email - audit log of membership-wide / targeted sends. Actual delivery
+// happens through Azure Communication Services Email (see EmailModule).
+// ---------------------------------------------------------------------------
+
+enum EmailRecipientScope {
+  ALL_MEMBERS
+  SPECIFIC_MEMBERS
+  ARC_REQUEST
+  VIOLATION
+}
+
+model EmailMessage {
+  id              String              @id @default(uuid())
+  hoaId           String
+  hoa             Hoa                 @relation(fields: [hoaId], references: [id])
+  sentByUserId    String
+  subject         String
+  recipientScope  EmailRecipientScope
+  relatedEntityId String?
+  createdAt       DateTime            @default(now())
+}

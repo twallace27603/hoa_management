@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# Testing
+coverage/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+tfplan.out
+crash.log
+crash.*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Prisma
+apps/api/generated/
+
+# AI-agent skill docs auto-installed by `prisma init`/`prisma generate` -
+# local tooling helper content, not project files.
+.claude/skills/
+.windsurf/skills/
+.agents/skills/
+skills-lock.json

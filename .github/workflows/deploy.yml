@@ -1,0 +1,145 @@
+name: Deploy
+
+# Runs on every push to main: builds+pushes the API image, applies
+# infrastructure, then deploys the frontend. Requires the same one-time
+# OIDC/secrets setup as terraform-plan.yml, plus ACR_LOGIN_SERVER (set once
+# the registry exists after the first manual `terraform apply`).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push via az acr build
+        id: image
+        run: |
+          IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/hoa-api:${{ github.sha }}"
+          az acr build --registry "${{ secrets.ACR_LOGIN_SERVER }}" --image "hoa-api:${{ github.sha }}" apps/api
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  terraform-apply:
+    needs: build-and-push-image
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/envs/dev
+    outputs:
+      frontend_hostname: ${{ steps.outputs.outputs.frontend_hostname }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ secrets.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ secrets.TFSTATE_STORAGE_ACCOUNT }}"
+
+      - name: Terraform Apply
+        run: |
+          terraform apply -auto-approve -input=false \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="postgres_administrator_password=${{ secrets.POSTGRES_ADMIN_PASSWORD }}" \
+            -var="entra_tenant_id=${{ secrets.ENTRA_TENANT_ID }}" \
+            -var="entra_client_id=${{ secrets.ENTRA_CLIENT_ID }}" \
+            -var="entra_jwks_uri=${{ secrets.ENTRA_JWKS_URI }}" \
+            -var="entra_issuer=${{ secrets.ENTRA_ISSUER }}" \
+            -var="cors_origin=${{ secrets.FRONTEND_ORIGIN }}" \
+            -var="api_container_image=${{ needs.build-and-push-image.outputs.image }}"
+
+      - name: Capture outputs
+        id: outputs
+        run: |
+          echo "frontend_hostname=$(terraform output -raw frontend_default_hostname)" >> "$GITHUB_OUTPUT"
+          TOKEN="$(terraform output -raw static_web_app_api_key)"
+          echo "::add-mask::$TOKEN"
+          echo "swa_token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+    # `outputs.swa_token` above is intentionally not surfaced as a job output
+    # (job outputs are visible in the workflow run UI) - it's re-read via a
+    # fresh `terraform output` in deploy-frontend instead.
+
+  deploy-frontend:
+    needs: terraform-apply
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/envs/dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ secrets.TFSTATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ secrets.TFSTATE_STORAGE_ACCOUNT }}"
+
+      - name: Read deployment token
+        id: swa
+        run: |
+          TOKEN="$(terraform output -raw static_web_app_api_key)"
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Build frontend
+        working-directory: apps/web
+        run: |
+          npm ci
+          npm run build
+        env:
+          NEXT_PUBLIC_API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          NEXT_PUBLIC_ENTRA_CLIENT_ID: ${{ secrets.FRONTEND_ENTRA_CLIENT_ID }}
+          NEXT_PUBLIC_ENTRA_AUTHORITY: ${{ secrets.ENTRA_AUTHORITY }}
+          NEXT_PUBLIC_ENTRA_KNOWN_AUTHORITY: ${{ secrets.ENTRA_KNOWN_AUTHORITY }}
+          NEXT_PUBLIC_ENTRA_REDIRECT_URI: ${{ secrets.FRONTEND_ORIGIN }}
+          NEXT_PUBLIC_ENTRA_API_SCOPE: ${{ secrets.ENTRA_API_SCOPE }}
+
+      - uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.swa.outputs.token }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: upload
+          app_location: apps/web
+          output_location: .next
+          skip_app_build: true
