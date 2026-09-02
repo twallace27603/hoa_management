@@ -19,8 +19,13 @@ concurrency:
 jobs:
   build-and-push-image:
     runs-on: ubuntu-latest
+    # Only the image tag (not the registry) is exposed as a job output:
+    # GitHub Actions silently empties any job output that contains a
+    # secret value when passing it to a dependent job, and the registry
+    # login server is a secret. The registry is reattached from the
+    # secret directly wherever the full image ref is needed downstream.
     outputs:
-      image: ${{ steps.image.outputs.image }}
+      image_tag: ${{ steps.image.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -33,9 +38,9 @@ jobs:
       - name: Build and push via az acr build
         id: image
         run: |
-          IMAGE="${{ secrets.ACR_LOGIN_SERVER }}/hoa-api:${{ github.sha }}"
-          az acr build --registry "${{ secrets.ACR_LOGIN_SERVER }}" --image "hoa-api:${{ github.sha }}" apps/api
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          TAG="hoa-api:${{ github.sha }}"
+          az acr build --registry "${{ secrets.ACR_LOGIN_SERVER }}" --image "$TAG" apps/api
+          echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"
 
   terraform-apply:
     needs: build-and-push-image
@@ -72,7 +77,7 @@ jobs:
             -var="entra_jwks_uri=${{ secrets.ENTRA_JWKS_URI }}" \
             -var="entra_issuer=${{ secrets.ENTRA_ISSUER }}" \
             -var="cors_origin=${{ secrets.FRONTEND_ORIGIN }}" \
-            -var="api_container_image=${{ needs.build-and-push-image.outputs.image }}"
+            -var="api_container_image=${{ secrets.ACR_LOGIN_SERVER }}/${{ needs.build-and-push-image.outputs.image_tag }}"
 
       - name: Capture outputs
         id: outputs
