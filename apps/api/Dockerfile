@@ -15,7 +15,12 @@ ENV NODE_ENV=production
 RUN groupadd --gid 1001 nodejs && useradd --uid 1001 --gid nodejs --shell /bin/false apiuser
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# npm itself (bundled in the base image) is only needed to install deps;
+# it's removed afterward since it's never invoked at runtime and its
+# own vendored tooling (tar, pacote, etc.) otherwise shows up as CVEs
+# in image scans for packages this app doesn't actually use.
+RUN npm ci --omit=dev && npm cache clean --force \
+    && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/generated ./generated
@@ -25,4 +30,4 @@ USER apiuser
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=3s CMD node -e "require('http').get('http://localhost:3001/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
-CMD ["node", "dist/main.js"]
+CMD ["node", "dist/src/main.js"]
