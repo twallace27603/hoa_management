@@ -58,11 +58,22 @@ module "key_vault" {
   tags                = local.tags
 }
 
-# So `terraform apply` itself can write the secrets below.
+# So `terraform apply` itself can write the secrets below. Granted to a
+# fixed set of principals (not `data.azurerm_client_config.current.object_id`)
+# because terraform runs as different identities - local operators and the
+# GitHub Actions OIDC service principal. Tying this to "whoever's currently
+# running terraform" makes the grant flip every time a different identity
+# applies: Terraform marks it "must be replaced," but the *replacement*
+# can't even start until after a state refresh that reads the existing Key
+# Vault secrets below - which the incoming identity doesn't have access to
+# yet, since granting that access is what this apply hasn't gotten to do.
+# Net effect: every switch between local and CI applies 403s on refresh
+# before anything else runs. A static for_each avoids the flip entirely.
 resource "azurerm_role_assignment" "deployer_key_vault_secrets_officer" {
+  for_each             = toset(var.key_vault_deployer_object_ids)
   scope                = module.key_vault.id
   role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = data.azurerm_client_config.current.object_id
+  principal_id         = each.value
 }
 
 module "storage" {

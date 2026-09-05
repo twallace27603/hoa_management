@@ -51,3 +51,18 @@ variable "cors_origin" {
   type        = string
   description = "Frontend origin allowed to call the API, e.g. https://<static-web-app>.azurestaticapps.net."
 }
+
+variable "key_vault_deployer_object_ids" {
+  type        = list(string)
+  description = <<-EOT
+    AAD object IDs granted Key Vault Secrets Officer on this environment's
+    vault - every identity that runs `terraform apply` here, human or CI.
+    Object IDs identify a principal for RBAC purposes only; they aren't
+    credentials, so committing them isn't a secret leak (unlike the OIDC
+    app's client ID, which stays a GitHub secret).
+  EOT
+  default     = [
+    "7f7e7a37-2f48-47b1-b39b-027aadb8f68a", # local operator (tswwci@hotmail.com)
+    "b4b9b751-e1c4-4f4d-8c24-939ff97c4dc9", # hoa-management-github-actions SP
+  ]
+}
